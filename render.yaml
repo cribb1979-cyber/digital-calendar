@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: digital-calendar
+    env: node
+    buildCommand: |
+      # Install client dependencies and build
+      cd client && npm install && npm run build
+      # Install server dependencies
+      cd ../server && npm install
+    startCommand: cd server && npm start
+    # Optional: set environment variables
+    # envVars:
+    #   NODE_ENV: production
+    #   PORT: 10000 (Render will set PORT automatically)

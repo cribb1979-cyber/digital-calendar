@@ -42,6 +42,7 @@ digital-calendar/
 ├── server/           # Backend API and services
 ├── README.md
 ├── .gitignore
+├── render.yaml       # Render deployment configuration
 └── package.json      # Optional root package.json for workspace management
 ```
 
@@ -52,6 +53,32 @@ The app uses the Web Speech API (`window.SpeechRecognition` or `webkitSpeechReco
 ## Reminders
 
 Reminders are implemented using the Notifications API and/or background sync (service workers) for timely alerts even when the app is not open.
+
+## Deploying to Render
+
+This repository includes a `render.yaml` file for easy deployment to Render.com.
+
+### Steps to Deploy:
+
+1. **Create a Render account** at https://render.com
+2. **Connect your GitHub/GitLab repository** or use a manual deploy
+3. **Render will automatically detect** the `render.yaml` file and set up the service
+4. **Build command**: Installs client dependencies, builds the frontend, installs server dependencies
+5. **Start command**: Starts the Node.js server
+6. **Environment variables**: Render will automatically set the PORT; you may want to set NODE_ENV=production
+
+### Manual Deployment via Render Dashboard:
+
+- New → Web Service
+- Connect your repository
+- Set environment:
+  - Build Command: `cd client && npm install && npm run build && cd ../server && npm install`
+  - Start Command: `cd server && npm start`
+- Ensure the root directory is the repository root
+
+### Note on Static File Serving:
+
+The server is configured to serve the built React frontend from `client/dist` when in production mode, so no separate frontend service is needed.
 
 ## Contributing
 
