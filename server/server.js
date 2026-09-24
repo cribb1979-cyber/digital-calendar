@@ -1,86 +1,88 @@
 const express = require('express');
 const cors = require('cors');
+const fs = require('fs');
 const path = require('path');
-const { createClient } = require('@supabase/supabase-js');
+const crypto = require('crypto');
+const { createStore, validateEvent, ValidationError } = require('./store');
 
-const app = express();
-const PORT = process.env.PORT || 5000;
+const CLIENT_DIST = path.join(__dirname, '../client/dist');
 
-// Supabase client initialization
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
-// Only create the client when credentials are configured, so the server
-// can still start (and serve the frontend) without them.
-const supabase = supabaseUrl && supabaseAnonKey
-  ? createClient(supabaseUrl, supabaseAnonKey)
-  : null;
-
-if (!supabase) {
-  console.warn('SUPABASE_URL and/or SUPABASE_ANON_KEY not set - Supabase is disabled');
-}
-
-// Middleware
-app.use(cors());
-app.use(express.json());
-
-// Serve static files from the React app (in production)
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../client/dist')));
-}
-
-// API routes
-app.get('/api/hello', (req, res) => {
-  res.json({ message: 'Hello from Digital Calendar API!' });
-});
-
-// Test Supabase connection
-app.get('/api/test-supabase', async (req, res) => {
-  if (!supabase) {
-    return res.status(503).json({
-      connected: false,
-      message: 'Supabase is not configured (set SUPABASE_URL and SUPABASE_ANON_KEY)'
-    });
-  }
-
-  try {
-    // Try to fetch one row from a table (adjust table name as needed)
-    const { data, error } = await supabase
-      .from('calendar_events') // Assuming you have a calendar_events table
-      .select('*')
-      .limit(1);
-    
-    if (error) {
-      // If table doesn't exist yet, we can still check if connection works
-      // by trying a simple query or checking the client
-      res.json({ 
-        connected: true, 
-        message: 'Supabase client initialized successfully',
-        note: 'Table query failed - ensure table exists or adjust table name',
-        error: error.message 
-      });
-    } else {
-      res.json({ 
-        connected: true, 
-        message: 'Supabase connection successful',
-        data: data 
-      });
+// Optional HTTP Basic auth so the calendar isn't open to anyone with the URL.
+function basicAuth(password) {
+  const expected = Buffer.from(password);
+  return (req, res, next) => {
+    const [scheme, encoded] = (req.headers.authorization || '').split(' ');
+    if (scheme === 'Basic' && encoded) {
+      const given = Buffer.from(Buffer.from(encoded, 'base64').toString().split(':').slice(1).join(':'));
+      if (given.length === expected.length && crypto.timingSafeEqual(given, expected)) return next();
     }
-  } catch (err) {
-    res.status(500).json({ 
-      connected: false, 
-      message: 'Failed to connect to Supabase',
-      error: err.message 
-    });
-  }
-});
+    res.set('WWW-Authenticate', 'Basic realm="Digital Calendar", charset="UTF-8"');
+    res.status(401).send('Authentication required');
+  };
+}
 
-// Handle React routing, return all requests to React app
-if (process.env.NODE_ENV === 'production') {
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, '../client/dist/index.html'));
+function createApp({ store, password } = {}) {
+  const app = express();
+  app.use(cors());
+  app.use(express.json());
+
+  // Health check stays public so Render can probe it
+  app.get('/api/health', (req, res) => {
+    res.json({ ok: true, storage: store.kind });
+  });
+
+  if (password) app.use(basicAuth(password));
+
+  const asyncRoute = (fn) => (req, res, next) => fn(req, res).catch(next);
+
+  app.get('/api/events', asyncRoute(async (req, res) => {
+    const { from, to } = req.query;
+    res.json(await store.list({ from, to }));
+  }));
+
+  app.post('/api/events', asyncRoute(async (req, res) => {
+    res.status(201).json(await store.create(validateEvent(req.body)));
+  }));
+
+  app.put('/api/events/:id', asyncRoute(async (req, res) => {
+    const event = await store.update(req.params.id, validateEvent(req.body, { partial: true }));
+    if (!event) return res.status(404).json({ error: 'Event not found' });
+    res.json(event);
+  }));
+
+  app.delete('/api/events/:id', asyncRoute(async (req, res) => {
+    if (!(await store.remove(req.params.id))) return res.status(404).json({ error: 'Event not found' });
+    res.status(204).end();
+  }));
+
+  app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
+
+  // Serve the built React app when it exists
+  if (fs.existsSync(CLIENT_DIST)) {
+    app.use(express.static(CLIENT_DIST));
+    app.get('*', (req, res) => res.sendFile(path.join(CLIENT_DIST, 'index.html')));
+  }
+
+  // eslint-disable-next-line no-unused-vars
+  app.use((err, req, res, next) => {
+    if (err instanceof ValidationError) return res.status(400).json({ error: err.message });
+    if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON' });
+    console.error(err);
+    res.status(500).json({ error: 'Internal server error' });
+  });
+
+  return app;
+}
+
+if (require.main === module) {
+  const store = createStore();
+  if (store.kind === 'file') {
+    console.warn('SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY not set - storing events in a local file (not persistent on Render)');
+  }
+  const PORT = process.env.PORT || 5000;
+  createApp({ store, password: process.env.APP_PASSWORD }).listen(PORT, () => {
+    console.log(`Server is running on port ${PORT} (storage: ${store.kind})`);
   });
 }
 
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+module.exports = { createApp };

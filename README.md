@@ -1,88 +1,92 @@
-# Digital Calendar App
+# Digital Calendar
 
-A web application for managing a fully digital calendar with voice input capabilities. Users can speak their events, and the app will automatically schedule them, ask for clarification on times, and provide reminders.
+A Swedish, voice-first calendar. Say (or type) something like
+*"Tandläkare på fredag klockan 3"* and the app works out the title, day and
+time, asks when something is unclear (*"Menar du klockan 03:00 eller 15:00?"*),
+and reminds you before the event.
 
 ## Features
 
-- Voice-to-text event creation using Web Speech API
-- Natural language processing for extracting event details (title, time, date)
-- Interactive confirmation dialogs for ambiguous time expressions
-- Reminder system (browser notifications, email/SMS optional)
-- Responsive design for mobile and desktop
-- Data persistence (localStorage or backend database)
+- **Voice or text input** via the Web Speech API (`sv-SE`); follow-up questions
+  are read aloud and can be answered by voice ("15", "på eftermiddagen", "spara").
+- **Swedish natural-language parsing** (`client/src/lib/parser.js`):
+  - days: *idag, imorgon, övermorgon, ikväll, på fredag, nästa måndag, om 3 dagar,
+    den 5 oktober, 12/11, 2026-12-24, den 30:e*
+  - times: *kl 15, 14:30, halv tre, kvart över tio, kvart i elva, klockan sju på kvällen*
+  - ranges and durations: *mellan 13 och 15, kl 9-11:30, i en och en halv timme*
+  - reminders: *påminn mig 30 minuter innan, med påminnelse 1 dag innan*
+  - all-day: *hela dagen, heldag*
+- **Clarification** for ambiguous hours (1–7 without *morgon/kväll*), missing day,
+  time or title.
+- **Month view, day list and upcoming events**; create, edit and delete events.
+- **Reminders** as browser notifications plus in-app alerts (while the app is
+  open in a tab). Default: 15 minutes before timed events.
+- **Storage** in Supabase, or a local JSON file when Supabase isn't configured.
+- Light/dark mode and mobile layout.
 
-## Tech Stack
+## Project structure
 
-- Frontend: React (or similar) with Web Speech API
-- Backend: Node.js/Express (optional for persistent storage and reminder scheduling)
-- Database: SQLite / MongoDB / Firebase (to be decided)
-- Real-time updates: WebSocket or polling (optional)
+```
+client/          React + Vite frontend
+  src/lib/       parser, date helpers, API client (with unit tests)
+  src/hooks/     speech recognition, reminders
+  src/components/
+server/          Express API that also serves client/dist
+  store.js       Supabase store + JSON file fallback
+  db/schema.sql  Supabase table definition
+  test/          API tests
+render.yaml
+```
 
-## Getting Started
+## Running locally
 
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd digital-calendar
-
-# Install dependencies (if using separate client/server)
-cd client && npm install
-cd ../server && npm install
-
-# Start development servers
-# In one terminal: cd client && npm run dev
-# In another terminal: cd server && npm run dev
+cd server && npm install && npm run dev      # API on http://localhost:5000
+cd client && npm install && npm run dev      # UI on http://localhost:5173 (proxies /api)
 ```
 
-## Project Structure
+Without Supabase variables, events are saved to `server/data/events.json`.
 
-```
-digital-calendar/
-├── client/           # Frontend application
-├── server/           # Backend API and services
-├── README.md
-├── .gitignore
-├── render.yaml       # Render deployment configuration
-└── package.json      # Optional root package.json for workspace management
+Tests:
+
+```bash
+cd client && npm test
+cd server && npm test
 ```
 
-## Voice Input
+## Supabase setup
 
-The app uses the Web Speech API (`window.SpeechRecognition` or `webkitSpeechRecognition`) to capture voice input and convert it to text. The text is then processed to extract event details.
+1. In the Supabase dashboard, open **SQL Editor** and run `server/db/schema.sql`.
+2. Copy the project URL and the **service_role** key from
+   **Project Settings → API**. The key is only used by the server and never
+   sent to the browser. Never share it.
 
-## Reminders
+## Environment variables
 
-Reminders are implemented using the Notifications API and/or background sync (service workers) for timely alerts even when the app is not open.
+| Variable | Required | Description |
+|---|---|---|
+| `SUPABASE_URL` | for persistence | Supabase project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | for persistence | Server-side key (works with RLS on). `SUPABASE_ANON_KEY` is accepted as a fallback but then needs RLS policies. |
+| `APP_PASSWORD` | no | Protects the whole app with HTTP Basic auth (any username) |
+| `NODE_ENV` | on Render | `production` |
+| `NODE_VERSION` | on Render | `22` |
+| `PORT` | no | Set automatically by Render |
+| `DATA_FILE` | no | Path for the JSON file store |
 
 ## Deploying to Render
 
-This repository includes a `render.yaml` file for easy deployment to Render.com.
+Create a **Web Service** from this repository with:
 
-### Steps to Deploy:
+- **Root directory:** empty (repository root)
+- **Build command:** `cd client && npm install && npm run build && cd ../server && npm install`
+- **Start command:** `cd server && npm start`
+- **Health check path:** `/api/health`
+- The environment variables above
 
-1. **Create a Render account** at https://render.com
-2. **Connect your GitHub/GitLab repository** or use a manual deploy
-3. **Render will automatically detect** the `render.yaml` file and set up the service
-4. **Build command**: Installs client dependencies, builds the frontend, installs server dependencies
-5. **Start command**: Starts the Node.js server
-6. **Environment variables**: Render will automatically set the PORT; you may want to set NODE_ENV=production
+(If the service is created as a Blueprint, `render.yaml` sets this up.)
 
-### Manual Deployment via Render Dashboard:
-
-- New → Web Service
-- Connect your repository
-- Set environment:
-  - Build Command: `cd client && npm install && npm run build && cd ../server && npm install`
-  - Start Command: `cd server && npm start`
-- Ensure the root directory is the repository root
-
-### Note on Static File Serving:
-
-The server is configured to serve the built React frontend from `client/dist` when in production mode, so no separate frontend service is needed.
-
-## Contributing
-
-Feel free to open issues or submit pull requests to improve the app.
+On Render's free plan the local disk is wiped on every deploy and restart, so
+configure Supabase to keep your events.
 
 ## License
 
