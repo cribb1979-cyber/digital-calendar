@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { parseEventText } from '../lib/parser.js';
 import { describeWhen } from '../lib/events.js';
 import { formatReminder, toDateKey, addDays } from '../lib/dates.js';
@@ -67,12 +67,33 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
   const [saving, setSaving] = useState(false);
   const [usedVoice, setUsedVoice] = useState(false);
 
-  const updateDraft = (next, voice) => {
+  // True while a hands-free voice dialog is running: after each spoken
+  // question we start listening again automatically, so no extra taps.
+  const conversationRef = useRef(false);
+  const silenceCountRef = useRef(0);
+
+  const promptFor = (d) => {
+    const q = questionFor(d);
+    return q ? q.text : `${d.title}, ${describeWhen(d)}. Säg spara eller avbryt.`;
+  };
+
+  const endConversation = () => {
+    conversationRef.current = false;
+    silenceCountRef.current = 0;
+  };
+
+  // Speak, then listen for the answer
+  const ask = (prompt) => {
+    conversationRef.current = true;
+    speak(prompt, {
+      // Short pause so the microphone doesn't pick up the end of the prompt
+      onDone: () => setTimeout(() => conversationRef.current && speech.start(), 300),
+    });
+  };
+
+  const updateDraft = (next, voice, prefix = '') => {
     setDraft(next);
-    if (voice) {
-      const q = questionFor(next);
-      speak(q ? q.text : `${next.title}, ${describeWhen(next)}. Säg spara eller tryck på Spara.`);
-    }
+    if (voice) ask(prefix + promptFor(next));
   };
 
   const interpret = (value, voice = false) => {
@@ -82,25 +103,53 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
   };
 
   const handleVoice = (transcript) => {
+    silenceCountRef.current = 0;
     setText(transcript);
+    const said = transcript.trim().replace(/[.!]$/, '');
     if (draft) {
-      if (/^(spara|ja|okej|ok|lägg in det|stämmer)\.?$/i.test(transcript.trim()) && !questionFor(draft)) {
-        save();
+      if (/^(spara|ja|okej|ok|lägg in det|stämmer|spara det)$/i.test(said)) {
+        const q = questionFor(draft);
+        if (q) ask(q.text);
+        else save();
         return;
       }
-      if (/^(avbryt|nej|glöm det)\.?$/i.test(transcript.trim())) {
+      if (/^(avbryt|nej|glöm det|stopp)$/i.test(said)) {
         reset();
+        speak('Avbrutet.');
         return;
       }
-      updateDraft(applyAnswer(draft, transcript), true);
+      const next = applyAnswer(draft, transcript);
+      updateDraft(next, true, next === draft ? 'Jag förstod inte. ' : '');
       return;
     }
     interpret(transcript, true);
   };
 
-  const speech = useSpeechRecognition({ onFinal: handleVoice });
+  const handleSilence = () => {
+    if (!conversationRef.current || !draft) return;
+    silenceCountRef.current += 1;
+    if (silenceCountRef.current === 1) {
+      ask(`Jag hörde inget. ${promptFor(draft)}`);
+    } else {
+      endConversation();
+      speak('Jag slutar lyssna. Tryck på mikrofonen för att fortsätta.');
+    }
+  };
+
+  const speech = useSpeechRecognition({ onFinal: handleVoice, onSilence: handleSilence });
+
+  const toggleMic = () => {
+    if (speech.listening) {
+      endConversation();
+      speech.stop();
+    } else {
+      window.speechSynthesis?.cancel();
+      speech.start();
+    }
+  };
 
   const reset = () => {
+    endConversation();
     setDraft(null);
     setText('');
   };
@@ -110,8 +159,13 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
     setSaving(true);
     try {
       await onSave(draft);
-      if (usedVoice) speak('Sparat.');
+      if (usedVoice) speak(`Sparat. ${draft.title}, ${describeWhen(draft)}.`);
       reset();
+    } catch {
+      if (conversationRef.current) {
+        endConversation();
+        speak('Det gick inte att spara.');
+      }
     } finally {
       setSaving(false);
     }
@@ -133,7 +187,7 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
         <button
           type="button"
           className={`mic ${speech.listening ? 'mic--on' : ''}`}
-          onClick={speech.listening ? speech.stop : speech.start}
+          onClick={toggleMic}
           disabled={!speech.supported}
           title={speech.supported ? 'Tala in en händelse' : 'Röstinmatning stöds inte i den här webbläsaren'}
           aria-label={speech.listening ? 'Sluta lyssna' : 'Tala in en händelse'}
@@ -194,7 +248,11 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
                   <button type="button" className="btn" onClick={() => set({ allDay: true })}>Heldag</button>
                 </div>
               )}
-              {speech.supported && <span className="draft__voice-hint">Du kan svara med rösten.</span>}
+              {speech.supported && (
+                <span className="draft__voice-hint">
+                  {speech.listening ? 'Lyssnar – svara med rösten.' : 'Du kan svara med rösten.'}
+                </span>
+              )}
             </div>
           )}
 
@@ -240,7 +298,7 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
             <button type="button" className="btn" onClick={() => { onMoreDetails(draft); reset(); }}>
               Fler detaljer
             </button>
-            <button type="button" className="btn btn--ghost" onClick={reset}>Avbryt</button>
+            <button type="button" className="btn btn--ghost" onClick={() => { reset(); window.speechSynthesis?.cancel(); speech.stop(); }}>Avbryt</button>
           </div>
         </div>
       )}
