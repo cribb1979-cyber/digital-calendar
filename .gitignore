@@ -7,6 +7,7 @@ pnpm-debug.log*
 
 # Build outputs
 /dist
+client/dist/
 /build
 /out
 /coverage

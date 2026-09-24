@@ -9,7 +9,15 @@ const PORT = process.env.PORT || 5000;
 // Supabase client initialization
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// Only create the client when credentials are configured, so the server
+// can still start (and serve the frontend) without them.
+const supabase = supabaseUrl && supabaseAnonKey
+  ? createClient(supabaseUrl, supabaseAnonKey)
+  : null;
+
+if (!supabase) {
+  console.warn('SUPABASE_URL and/or SUPABASE_ANON_KEY not set - Supabase is disabled');
+}
 
 // Middleware
 app.use(cors());
@@ -27,6 +35,13 @@ app.get('/api/hello', (req, res) => {
 
 // Test Supabase connection
 app.get('/api/test-supabase', async (req, res) => {
+  if (!supabase) {
+    return res.status(503).json({
+      connected: false,
+      message: 'Supabase is not configured (set SUPABASE_URL and SUPABASE_ANON_KEY)'
+    });
+  }
+
   try {
     // Try to fetch one row from a table (adjust table name as needed)
     const { data, error } = await supabase
