@@ -244,3 +244,4 @@ button, input, select, textarea { font: inherit; color: inherit; }
   0% { box-shadow: 0 0 0 0 rgb(31 157 85 / 50%); }
   100% { box-shadow: 0 0 0 8px rgb(31 157 85 / 0%); }
 }
+.handsfree__heard { flex-basis: 100%; font-style: italic; }
