@@ -50,3 +50,5 @@ pnpm-debug.log*
 
 # React specific
 *.map
+# Local event storage (server file store)
+server/data/

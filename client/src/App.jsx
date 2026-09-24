@@ -1,110 +1,141 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
+import QuickAdd from './components/QuickAdd.jsx';
+import MonthView from './components/MonthView.jsx';
+import DayPanel from './components/DayPanel.jsx';
+import EventModal from './components/EventModal.jsx';
+import Toasts from './components/Toasts.jsx';
+import { api } from './lib/api.js';
+import { buildEventPayload, eventToValues } from './lib/events.js';
+import { fromDateKey, toDateKey } from './lib/dates.js';
+import { useReminders } from './hooks/useReminders.js';
 
-function App() {
-  const [transcript, setTranscript] = useState('');
-  const [listening, setListening] = useState(false);
-  const [browserSupport, setBrowserSupport] = useState(true);
-  const [error, setError] = useState('');
+let toastId = 0;
 
-  useEffect(() => {
-    // Check for SpeechRecognition support
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setBrowserSupport(false);
-      setError('Speech recognition not supported in this browser. Please use Chrome or Edge for voice input.');
-    }
+export default function App() {
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState(() => toDateKey(new Date()));
+  const [month, setMonth] = useState(() => {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth(), 1);
+  });
+  // { values, event? } while the edit dialog is open
+  const [editing, setEditing] = useState(null);
+  const [toasts, setToasts] = useState([]);
+
+  const toast = useCallback((kind, title, body) => {
+    const id = ++toastId;
+    setToasts((t) => [...t, { id, kind, title, body }]);
+    if (kind !== 'reminder') setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 6000);
   }, []);
 
-  const startListening = () => {
-    if (!browserSupport) return;
-    setError('');
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    const recognition = new SpeechRecognition();
-    recognition.interimResults = true;
-    recognition.lang = 'sv-SE'; // Swedish language
+  const load = useCallback(async () => {
+    try {
+      setEvents(await api.list());
+    } catch (err) {
+      toast('error', 'Kunde inte hämta kalendern', err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
 
-    recognition.onresult = (event) => {
-      const transcript = Array.from(event.results)
-        .map(result => result[0])
-        .map(result => result.transcript)
-        .join('');
-      setTranscript(transcript);
-    };
+  useEffect(() => {
+    load();
+  }, [load]);
 
-    recognition.onend = () => {
-      setListening(false);
-    };
+  const onRemind = useCallback((ev, body) => toast('reminder', `🔔 ${ev.title}`, body), [toast]);
+  const { permission, requestPermission } = useReminders(events, onRemind);
 
-    recognition.onerror = (event) => {
-      setError(`Speech recognition error: ${event.error}`);
-      setListening(false);
-    };
-
-    setListening(true);
-    recognition.start();
+  const selectDay = (key) => {
+    setSelected(key);
+    const d = fromDateKey(key);
+    setMonth(new Date(d.getFullYear(), d.getMonth(), 1));
   };
 
-  const stopListening = () => {
-    // Note: In a real app, you'd keep references to the recognition object to stop it.
-    // For simplicity, we'll just set listening to false and rely on onend.
-    setListening(false);
+  const create = async (values) => {
+    try {
+      const created = await api.create(buildEventPayload(values));
+      setEvents((list) => [...list, created]);
+      selectDay(values.date);
+      toast('success', 'Händelsen är sparad', created.title);
+    } catch (err) {
+      toast('error', 'Kunde inte spara', err.message);
+      throw err;
+    }
+  };
+
+  const saveFromModal = async (values) => {
+    const payload = buildEventPayload(values);
+    if (editing.event) {
+      const updated = await api.update(editing.event.id, payload);
+      setEvents((list) => list.map((e) => (e.id === updated.id ? updated : e)));
+      selectDay(values.date);
+      toast('success', 'Ändringarna är sparade', updated.title);
+    } else {
+      await create(values);
+    }
+    setEditing(null);
+  };
+
+  const removeEvent = async () => {
+    await api.remove(editing.event.id);
+    setEvents((list) => list.filter((e) => e.id !== editing.event.id));
+    toast('success', 'Händelsen är borttagen', editing.event.title);
+    setEditing(null);
   };
 
   return (
-    <div className="App">
-      <header className="App-header">
-        <h1>Digital Calendar</h1>
-        <p>Voice-powered calendar app</p>
-
-        {!browserSupport && (
-          <div style={{ backgroundColor: '#ffebee', color: '#c62828', padding: '10px', margin: '10px 0', borderRadius: '4px' }}>
-            <strong>Browser Compatibility Notice:</strong> {error}
+    <div className="app">
+      <header className="app__header">
+        <div className="brand">
+          <span className="brand__logo" aria-hidden="true">📅</span>
+          <div>
+            <h1>Digital kalender</h1>
+            <p className="muted">Säg vad du ska göra – kalendern sköter resten.</p>
           </div>
+        </div>
+        {permission === 'default' && (
+          <button type="button" className="btn" onClick={requestPermission}>🔔 Aktivera påminnelser</button>
         )}
-
-        {error && browserSupport && (
-          <div style={{ backgroundColor: '#fff8e1', color: '#bf360c', padding: '10px', margin: '10px 0', borderRadius: '4px' }}>
-            <strong>Error:</strong> {error}
-          </div>
+        {permission === 'denied' && (
+          <p className="muted small">Notiser är blockerade – påminnelser visas bara i appen.</p>
         )}
-
-        <div style={{ margin: '20px 0' }}>
-          <button
-            onClick={listening ? stopListening : startListening}
-            disabled={!browserSupport}
-            style={{
-              padding: '10px 20px',
-              fontSize: '16px',
-              backgroundColor: listening ? '#f44336' : '#4caf50',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: listening ? 'not-allowed' : 'pointer'
-            }}
-          >
-            {listening ? 'Listening... (Click to stop)' : 'Start Voice Input'}
-          </button>
-        </div>
-
-        <div style={{ marginTop: '20px', padding: '10px', backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
-          <h3>Transcribed Text:</h3>
-          <p>{transcript || '(Listening for speech...)'}</p>
-        </div>
-
-        <div style={{ marginTop: '20px', fontSize: '14px', color: '#666' }}>
-          <p><strong>Note:</strong> Voice input uses the Web Speech API, which is currently only fully supported in Chrome and Edge.</p>
-          <p>For Firefox, you can enable experimental features:</p>
-          <ol>
-            <li>Type <code>about:config</code> in the address bar</li>
-            <li>Search for <code>media.webspeech.recognition.enable</code></li>
-            <li>Set the value to <code>true</code></li>
-            <li>Restart Firefox</li>
-          </ol>
-          <p>Or use Chrome/Edge for the best voice input experience.</p>
-        </div>
       </header>
+
+      <QuickAdd onSave={create} onMoreDetails={(draft) => setEditing({ values: draft })} />
+
+      <main className="layout">
+        <MonthView
+          month={month}
+          selected={selected}
+          events={events}
+          onSelect={setSelected}
+          onOpenEvent={(ev) => setEditing({ event: ev, values: eventToValues(ev) })}
+          onPrev={() => setMonth((m) => new Date(m.getFullYear(), m.getMonth() - 1, 1))}
+          onNext={() => setMonth((m) => new Date(m.getFullYear(), m.getMonth() + 1, 1))}
+          onToday={() => selectDay(toDateKey(new Date()))}
+        />
+        <DayPanel
+          selected={selected}
+          events={events}
+          onNew={() => setEditing({ values: { date: selected, time: '09:00' } })}
+          onOpen={(ev) => setEditing({ event: ev, values: eventToValues(ev) })}
+        />
+      </main>
+
+      {loading && <p className="muted center">Laddar…</p>}
+
+      {editing && (
+        <EventModal
+          values={editing.values}
+          isNew={!editing.event}
+          onSave={saveFromModal}
+          onDelete={removeEvent}
+          onClose={() => setEditing(null)}
+        />
+      )}
+
+      <Toasts toasts={toasts} onDismiss={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
     </div>
   );
 }
-
-export default App;
