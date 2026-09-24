@@ -61,8 +61,9 @@ function applyAnswer(draft, answer) {
   return next;
 }
 
-// "Kalender, tandläkare på fredag" - the wake word may come with the command
-const WAKE_RE = /(?:^|\s)(?:hej\s+|hallå\s+|ok(?:ej)?\s+)?kalender(?:n)?[\s,.!:]*(.*)$/i;
+// "Kalender, tandläkare på fredag" - the wake word may come with the command.
+// Also accept common misrecognitions like "kalendar" or "calendar".
+const WAKE_RE = /(?:^|\s)(?:hej\s+|hallå\s+|ok(?:ej)?\s+)?[kc]al[ae]nd[ae]r(?:n|en)?[\s,.!:]*(.*)$/i;
 
 export default function QuickAdd({ onSave, onMoreDetails }) {
   const [text, setText] = useState('');
@@ -70,6 +71,8 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
   const [saving, setSaving] = useState(false);
   const [usedVoice, setUsedVoice] = useState(false);
   const [handsFree, setHandsFree] = useState(false);
+  // What the microphone last heard while waiting for the wake word
+  const [lastHeard, setLastHeard] = useState('');
 
   // Voice state lives in refs because speech callbacks fire outside renders.
   const handsFreeRef = useRef(false);
@@ -101,7 +104,9 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
   const listenForWakeWord = () => {
     if (!handsFreeRef.current || conversationRef.current || speakingRef.current) return;
     modeRef.current = 'wake';
-    speech.start({ continuous: true });
+    // Short one-utterance sessions, restarted after each one. Continuous
+    // recognition is unreliable on Android Chrome (later phrases get lost).
+    speech.start();
   };
 
   // Speak, then listen for the answer (in a dialog) or for the wake word
@@ -170,8 +175,10 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
       handleVoice(transcript);
       return;
     }
+    setLastHeard(transcript);
     const m = WAKE_RE.exec(transcript);
     if (!m) return; // not for us - keep listening
+    setLastHeard('');
     setUsedVoice(true);
     const command = m[1].trim();
     if (command) handleVoice(command);
@@ -339,6 +346,7 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
               <>
                 {wakeListening && <span className="handsfree__dot" aria-hidden="true" />}
                 {wakeListening ? 'Lyssnar efter ”Kalender”…' : 'Handsfree är på.'} Säg t.ex. ”Kalender, tandläkare på fredag klockan 3”.
+                {lastHeard && <span className="handsfree__heard">Hörde: ”{lastHeard}” – börja med ”Kalender”.</span>}
               </>
             ) : (
               'Slå på för att styra helt med rösten, t.ex. i bilen.'
