@@ -1,8 +1,8 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { parseEventText } from '../lib/parser.js';
 import { describeWhen } from '../lib/events.js';
 import { formatReminder, toDateKey, addDays } from '../lib/dates.js';
-import { speak, useSpeechRecognition } from '../hooks/useSpeechRecognition.js';
+import { FATAL_ERRORS, speak, useSpeechRecognition } from '../hooks/useSpeechRecognition.js';
 
 const EXAMPLES = [
   'Tandläkare på fredag klockan 3',
@@ -61,18 +61,29 @@ function applyAnswer(draft, answer) {
   return next;
 }
 
+// "Kalender, tandläkare på fredag" - the wake word may come with the command
+const WAKE_RE = /(?:^|\s)(?:hej\s+|hallå\s+|ok(?:ej)?\s+)?kalender(?:n)?[\s,.!:]*(.*)$/i;
+
 export default function QuickAdd({ onSave, onMoreDetails }) {
   const [text, setText] = useState('');
   const [draft, setDraft] = useState(null);
   const [saving, setSaving] = useState(false);
   const [usedVoice, setUsedVoice] = useState(false);
+  const [handsFree, setHandsFree] = useState(false);
 
-  // True while a hands-free voice dialog is running: after each spoken
-  // question we start listening again automatically, so no extra taps.
+  // Voice state lives in refs because speech callbacks fire outside renders.
+  const handsFreeRef = useRef(false);
+  // 'wake': listening for the wake word, 'dialog': waiting for an answer
+  const modeRef = useRef(null);
+  // True while a voice dialog is running: after each spoken question we
+  // listen again automatically, so no extra taps are needed.
   const conversationRef = useRef(false);
+  const speakingRef = useRef(false);
   const silenceCountRef = useRef(0);
+  const wakeLockRef = useRef(null);
 
   const promptFor = (d) => {
+    if (!d) return 'Vad vill du lägga in?';
     const q = questionFor(d);
     return q ? q.text : `${d.title}, ${describeWhen(d)}. Säg spara eller avbryt.`;
   };
@@ -82,13 +93,42 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
     silenceCountRef.current = 0;
   };
 
-  // Speak, then listen for the answer
+  const listenForAnswer = () => {
+    modeRef.current = 'dialog';
+    speech.start();
+  };
+
+  const listenForWakeWord = () => {
+    if (!handsFreeRef.current || conversationRef.current || speakingRef.current) return;
+    modeRef.current = 'wake';
+    speech.start({ continuous: true });
+  };
+
+  // Speak, then listen for the answer (in a dialog) or for the wake word
+  const say = (prompt) => {
+    speakingRef.current = true;
+    speech.stop();
+    speak(prompt, {
+      onDone: () => {
+        // Short pause so the microphone doesn't pick up the end of the prompt
+        setTimeout(() => {
+          speakingRef.current = false;
+          if (conversationRef.current) listenForAnswer();
+          else listenForWakeWord();
+        }, 300);
+      },
+    });
+  };
+
   const ask = (prompt) => {
     conversationRef.current = true;
-    speak(prompt, {
-      // Short pause so the microphone doesn't pick up the end of the prompt
-      onDone: () => setTimeout(() => conversationRef.current && speech.start(), 300),
-    });
+    say(prompt);
+  };
+
+  // End the dialog with a last message
+  const finish = (message) => {
+    endConversation();
+    say(message);
   };
 
   const updateDraft = (next, voice, prefix = '') => {
@@ -106,16 +146,16 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
     silenceCountRef.current = 0;
     setText(transcript);
     const said = transcript.trim().replace(/[.!]$/, '');
+    if (/^(avbryt|nej|glöm det|stopp)$/i.test(said)) {
+      reset();
+      finish('Avbrutet.');
+      return;
+    }
     if (draft) {
       if (/^(spara|ja|okej|ok|lägg in det|stämmer|spara det)$/i.test(said)) {
         const q = questionFor(draft);
         if (q) ask(q.text);
         else save();
-        return;
-      }
-      if (/^(avbryt|nej|glöm det|stopp)$/i.test(said)) {
-        reset();
-        speak('Avbrutet.');
         return;
       }
       const next = applyAnswer(draft, transcript);
@@ -125,26 +165,98 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
     interpret(transcript, true);
   };
 
+  const handleResult = (transcript) => {
+    if (modeRef.current !== 'wake') {
+      handleVoice(transcript);
+      return;
+    }
+    const m = WAKE_RE.exec(transcript);
+    if (!m) return; // not for us - keep listening
+    setUsedVoice(true);
+    const command = m[1].trim();
+    if (command) handleVoice(command);
+    else ask(draft ? promptFor(draft) : 'Ja?');
+  };
+
   const handleSilence = () => {
-    if (!conversationRef.current || !draft) return;
+    if (!conversationRef.current) {
+      listenForWakeWord();
+      return;
+    }
     silenceCountRef.current += 1;
     if (silenceCountRef.current === 1) {
       ask(`Jag hörde inget. ${promptFor(draft)}`);
     } else {
-      endConversation();
-      speak('Jag slutar lyssna. Tryck på mikrofonen för att fortsätta.');
+      finish(handsFreeRef.current
+        ? 'Jag väntar. Säg kalender när du behöver mig.'
+        : 'Jag slutar lyssna. Tryck på mikrofonen för att fortsätta.');
     }
   };
 
-  const speech = useSpeechRecognition({ onFinal: handleVoice, onSilence: handleSilence });
+  const handleEnd = ({ heard, error }) => {
+    if (speakingRef.current) return;
+    if (FATAL_ERRORS.has(error)) {
+      endConversation();
+      stopHandsFree();
+      return;
+    }
+    if (modeRef.current === 'dialog') {
+      if (!heard) handleSilence();
+      return;
+    }
+    if (modeRef.current === 'wake' && !conversationRef.current) {
+      // Browsers end continuous listening now and then; just start again.
+      // Back off a little after errors (e.g. network) to avoid a tight loop.
+      setTimeout(listenForWakeWord, error && error !== 'no-speech' ? 2000 : 250);
+    }
+  };
+
+  const speech = useSpeechRecognition({ onResult: handleResult, onEnd: handleEnd });
+
+  const acquireWakeLock = async () => {
+    try {
+      wakeLockRef.current = await navigator.wakeLock?.request('screen');
+    } catch {
+      // Not supported or denied - the screen may turn off
+    }
+  };
+
+  const startHandsFree = () => {
+    handsFreeRef.current = true;
+    setHandsFree(true);
+    acquireWakeLock();
+    say('Handsfree är på. Säg kalender och vad du vill lägga in.');
+  };
+
+  function stopHandsFree() {
+    handsFreeRef.current = false;
+    setHandsFree(false);
+    modeRef.current = null;
+    speech.stop();
+    wakeLockRef.current?.release().catch(() => {});
+    wakeLockRef.current = null;
+  }
+
+  // The screen lock and microphone are dropped when the tab is hidden;
+  // pick them up again when it comes back.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible' || !handsFreeRef.current) return;
+      acquireWakeLock();
+      if (!conversationRef.current) listenForWakeWord();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  });
 
   const toggleMic = () => {
-    if (speech.listening) {
+    window.speechSynthesis?.cancel();
+    speakingRef.current = false;
+    if (speech.listening && modeRef.current === 'dialog') {
       endConversation();
       speech.stop();
     } else {
-      window.speechSynthesis?.cancel();
-      speech.start();
+      listenForAnswer();
     }
   };
 
@@ -159,17 +271,17 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
     setSaving(true);
     try {
       await onSave(draft);
-      if (usedVoice) speak(`Sparat. ${draft.title}, ${describeWhen(draft)}.`);
+      if (usedVoice) finish(`Sparat. ${draft.title}, ${describeWhen(draft)}.`);
       reset();
     } catch {
-      if (conversationRef.current) {
-        endConversation();
-        speak('Det gick inte att spara.');
-      }
+      if (conversationRef.current) finish('Det gick inte att spara.');
     } finally {
       setSaving(false);
     }
   };
+
+  const wakeListening = handsFree && speech.listening && modeRef.current === 'wake';
+  const dialogListening = speech.listening && modeRef.current === 'dialog';
 
   const question = questionFor(draft);
   const set = (patch) => setDraft((d) => ({ ...d, ...patch }));
@@ -186,11 +298,11 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
       >
         <button
           type="button"
-          className={`mic ${speech.listening ? 'mic--on' : ''}`}
+          className={`mic ${dialogListening ? 'mic--on' : ''}`}
           onClick={toggleMic}
           disabled={!speech.supported}
           title={speech.supported ? 'Tala in en händelse' : 'Röstinmatning stöds inte i den här webbläsaren'}
-          aria-label={speech.listening ? 'Sluta lyssna' : 'Tala in en händelse'}
+          aria-label={dialogListening ? 'Sluta lyssna' : 'Tala in en händelse'}
         >
           <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
             <path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z" />
@@ -198,15 +310,42 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
         </button>
         <input
           className="quick-add__input"
-          value={speech.listening ? speech.interim : text}
+          value={dialogListening ? speech.interim : text}
           onChange={(e) => setText(e.target.value)}
-          placeholder={speech.listening ? 'Lyssnar…' : 'Säg eller skriv t.ex. "Tandläkare på fredag klockan 3"'}
+          placeholder={dialogListening
+            ? 'Lyssnar…'
+            : handsFree
+              ? 'Säg "Kalender, …" eller skriv här'
+              : 'Säg eller skriv t.ex. "Tandläkare på fredag klockan 3"'}
           aria-label="Beskriv händelsen"
         />
-        <button type="submit" className="btn btn--primary" disabled={!text.trim() || speech.listening}>
+        <button type="submit" className="btn btn--primary" disabled={!text.trim() || dialogListening}>
           Tolka
         </button>
       </form>
+
+      {speech.supported && (
+        <div className="handsfree">
+          <button
+            type="button"
+            className={`btn handsfree__toggle ${handsFree ? 'handsfree__toggle--on' : ''}`}
+            onClick={handsFree ? stopHandsFree : startHandsFree}
+            aria-pressed={handsFree}
+          >
+            🚗 Handsfree {handsFree ? 'på' : 'av'}
+          </button>
+          <span className="handsfree__status">
+            {handsFree ? (
+              <>
+                {wakeListening && <span className="handsfree__dot" aria-hidden="true" />}
+                {wakeListening ? 'Lyssnar efter ”Kalender”…' : 'Handsfree är på.'} Säg t.ex. ”Kalender, tandläkare på fredag klockan 3”.
+              </>
+            ) : (
+              'Slå på för att styra helt med rösten, t.ex. i bilen.'
+            )}
+          </span>
+        </div>
+      )}
 
       {speech.error && <p className="quick-add__error">{speech.error}</p>}
       {!speech.supported && (
@@ -250,7 +389,7 @@ export default function QuickAdd({ onSave, onMoreDetails }) {
               )}
               {speech.supported && (
                 <span className="draft__voice-hint">
-                  {speech.listening ? 'Lyssnar – svara med rösten.' : 'Du kan svara med rösten.'}
+                  {dialogListening ? 'Lyssnar – svara med rösten.' : 'Du kan svara med rösten.'}
                 </span>
               )}
             </div>

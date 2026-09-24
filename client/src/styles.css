@@ -230,3 +230,17 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .toast--success { border-left-color: var(--success); }
 .toast--error { border-left-color: var(--danger); }
 .toast--reminder { border-left-color: #f59f00; }
+
+/* Hands-free mode */
+.handsfree { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+.handsfree__toggle--on { background: var(--success); border-color: var(--success); color: #fff; font-weight: 600; }
+.handsfree__toggle--on:hover:not(:disabled) { background: var(--success); filter: brightness(1.08); }
+.handsfree__status { color: var(--muted); font-size: 0.85rem; display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.handsfree__dot {
+  width: 10px; height: 10px; border-radius: 50%; background: var(--success);
+  animation: pulse-green 1.4s infinite;
+}
+@keyframes pulse-green {
+  0% { box-shadow: 0 0 0 0 rgb(31 157 85 / 50%); }
+  100% { box-shadow: 0 0 0 8px rgb(31 157 85 / 0%); }
+}

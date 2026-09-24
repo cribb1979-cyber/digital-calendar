@@ -10,59 +10,95 @@ const ERROR_MESSAGES = {
   'audio-capture': 'Ingen mikrofon hittades.',
   network: 'Taligenkänningen kräver internetanslutning.',
 };
+// Errors after which restarting the microphone automatically is pointless
+export const FATAL_ERRORS = new Set(['not-allowed', 'service-not-allowed', 'audio-capture']);
 
 /**
- * Wraps the Web Speech API. `onFinal` is called with the final transcript;
- * `onSilence` when a listening session ends without any speech.
+ * Wraps the Web Speech API.
+ *
+ * - `start()` listens for one utterance; `onResult` gets it when listening ends.
+ * - `start({ continuous: true })` keeps listening and calls `onResult` for
+ *   every finished phrase as it arrives.
+ * - `onEnd({ heard, error })` runs whenever a listening session ends.
  */
-export function useSpeechRecognition({ lang = 'sv-SE', onFinal, onSilence } = {}) {
+export function useSpeechRecognition({ lang = 'sv-SE', onResult, onEnd } = {}) {
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState('');
   const [error, setError] = useState('');
   const recognitionRef = useRef(null);
-  const onFinalRef = useRef(onFinal);
-  onFinalRef.current = onFinal;
-  const onSilenceRef = useRef(onSilence);
-  onSilenceRef.current = onSilence;
+  const pendingStartRef = useRef(null);
+  const callbacks = useRef({});
+  callbacks.current = { onResult, onEnd };
 
-  useEffect(() => () => recognitionRef.current?.abort(), []);
+  useEffect(() => () => {
+    pendingStartRef.current = null;
+    recognitionRef.current?.abort();
+  }, []);
 
-  const start = useCallback(() => {
-    if (!SpeechRecognition || recognitionRef.current) return;
+  const start = useCallback(({ continuous = false } = {}) => {
+    if (!SpeechRecognition) return;
+    if (recognitionRef.current) {
+      // Still shutting down: start again as soon as it has ended
+      pendingStartRef.current = { continuous };
+      recognitionRef.current.stop();
+      return;
+    }
     setError('');
     setInterim('');
     const recognition = new SpeechRecognition();
     recognition.lang = lang;
     recognition.interimResults = true;
-    recognition.continuous = false;
+    recognition.continuous = continuous;
     let finalText = '';
+    let handled = 0;
+    let lastError = null;
 
     recognition.onresult = (event) => {
       let text = '';
-      for (const result of event.results) {
-        text += result[0].transcript;
-        if (result.isFinal) finalText = text;
+      for (let i = handled; i < event.results.length; i++) {
+        const result = event.results[i];
+        if (result.isFinal) {
+          handled = i + 1;
+          const phrase = result[0].transcript.trim();
+          if (!phrase) continue;
+          if (continuous) callbacks.current.onResult?.(phrase);
+          else finalText = `${finalText} ${phrase}`.trim();
+        } else {
+          text += result[0].transcript;
+        }
       }
       setInterim(text);
     };
     recognition.onerror = (event) => {
-      // Silence is reported through onSilence instead
-      if (event.error !== 'aborted' && event.error !== 'no-speech') setError(ERROR_MESSAGES[event.error] || `Fel vid taligenkänning: ${event.error}`);
+      lastError = event.error;
+      if (ERROR_MESSAGES[event.error]) setError(ERROR_MESSAGES[event.error]);
     };
     recognition.onend = () => {
       recognitionRef.current = null;
       setListening(false);
       setInterim('');
-      if (finalText.trim()) onFinalRef.current?.(finalText.trim());
-      else onSilenceRef.current?.();
+      const pending = pendingStartRef.current;
+      pendingStartRef.current = null;
+      if (finalText) callbacks.current.onResult?.(finalText);
+      // A pending start replaces this session, so it isn't reported as ended
+      if (pending) start(pending);
+      else callbacks.current.onEnd?.({ heard: handled > 0, error: lastError });
     };
 
     recognitionRef.current = recognition;
     setListening(true);
-    recognition.start();
+    try {
+      recognition.start();
+    } catch {
+      recognitionRef.current = null;
+      setListening(false);
+    }
   }, [lang]);
 
-  const stop = useCallback(() => recognitionRef.current?.stop(), []);
+  const stop = useCallback(() => {
+    pendingStartRef.current = null;
+    recognitionRef.current?.stop();
+  }, []);
 
   return { supported: !!SpeechRecognition, listening, interim, error, start, stop };
 }
