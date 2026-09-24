@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Digital Calendar App
 
 A web application for managing a fully digital calendar with voice input capabilities. Users can speak their events, and the app will automatically schedule them, ask for clarification on times, and provide reminders.
@@ -87,3 +88,6 @@ Feel free to open issues or submit pull requests to improve the app.
 ## License
 
 MIT
+=======
+# digital-calendar
+>>>>>>> 7f900946b5a397b525db2db107abcb0b3fe50b47
